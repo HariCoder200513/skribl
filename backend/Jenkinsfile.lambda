@@ -1,0 +1,67 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION = 'ap-southeast-2'
+    AWS_PROFILE = 'aws'
+    FUNCTION_NAME = 'skribl-backend'
+    JAR_NAME = 'skribl-backend-0.0.1-SNAPSHOT.jar'
+    ZIP_NAME = 'skribl-backend-lambda.zip'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Test') {
+      steps {
+        dir('backend') {
+          sh 'mvn test'
+        }
+      }
+    }
+
+    stage('Build JAR') {
+      steps {
+        dir('backend') {
+          sh 'mvn clean package -DskipTests'
+        }
+      }
+    }
+
+    stage('Package Lambda') {
+      steps {
+        dir('backend/target') {
+          sh 'rm -f ${ZIP_NAME} && zip ${ZIP_NAME} ${JAR_NAME}'
+        }
+      }
+    }
+
+    stage('Deploy to Lambda') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
+          sh '''
+            cd backend/target
+            aws lambda update-function-code \
+              --function-name $FUNCTION_NAME \
+              --zip-file fileb://$ZIP_NAME \
+              --region $AWS_REGION \
+              --no-cli-pager
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo 'Lambda deployment successful!'
+    }
+    failure {
+      echo 'Lambda deployment failed!'
+    }
+  }
+}
