@@ -1,12 +1,16 @@
 pipeline {
   agent any
 
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+  }
+
   environment {
-    AWS_REGION = 'ap-southeast-2'
-    AWS_PROFILE = 'aws'
+    AWS_REGION    = 'ap-southeast-2'
     FUNCTION_NAME = 'skribl-backend'
-    JAR_NAME = 'skribl-backend-0.0.1-SNAPSHOT.jar'
-    ZIP_NAME = 'skribl-backend-lambda.zip'
+    JAR_NAME      = 'skribl-backend-0.0.1-SNAPSHOT.jar'
+    ZIP_NAME      = 'skribl-backend-lambda.zip'
   }
 
   stages {
@@ -19,7 +23,7 @@ pipeline {
     stage('Test') {
       steps {
         dir('backend') {
-          sh 'mvn test'
+          sh 'mvn -B test'
         }
       }
     }
@@ -27,15 +31,39 @@ pipeline {
     stage('Build JAR') {
       steps {
         dir('backend') {
-          sh 'mvn clean package -DskipTests'
+          sh 'mvn -B clean package -DskipTests'
         }
       }
     }
 
-    stage('Package Lambda') {
+    stage('Package Lambda Zip') {
       steps {
         dir('backend/target') {
-          sh 'rm -f ${ZIP_NAME} && zip ${ZIP_NAME} ${JAR_NAME}'
+          // Lambda zip packages need the jar at the root of the archive
+          sh 'rm -f $ZIP_NAME && cp $JAR_NAME app.jar && zip -q $ZIP_NAME app.jar && rm app.jar'
+        }
+      }
+    }
+
+    stage('Upload to S3') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
+          sh '''
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            BUCKET=skribl-artifacts-$ACCOUNT_ID-$AWS_REGION
+            KEY=backend/$BUILD_NUMBER/$ZIP_NAME
+
+            if ! aws s3api head-bucket --bucket $BUCKET >/dev/null 2>&1; then
+              aws s3api create-bucket --bucket $BUCKET --region $AWS_REGION \
+                --create-bucket-configuration LocationConstraint=$AWS_REGION
+              aws s3api put-public-access-block --bucket $BUCKET \
+                --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+            fi
+
+            aws s3 cp backend/target/$ZIP_NAME s3://$BUCKET/$KEY --region $AWS_REGION
+            echo $BUCKET > s3-bucket.txt
+            echo $KEY > s3-key.txt
+          '''
         }
       }
     }
@@ -44,12 +72,16 @@ pipeline {
       steps {
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
           sh '''
-            cd backend/target
             aws lambda update-function-code \
               --function-name $FUNCTION_NAME \
-              --zip-file fileb://$ZIP_NAME \
+              --s3-bucket $(cat s3-bucket.txt) \
+              --s3-key $(cat s3-key.txt) \
               --region $AWS_REGION \
               --no-cli-pager
+
+            aws lambda wait function-updated-v2 \
+              --function-name $FUNCTION_NAME \
+              --region $AWS_REGION
           '''
         }
       }
@@ -58,10 +90,11 @@ pipeline {
 
   post {
     success {
-      echo 'Lambda deployment successful!'
+      archiveArtifacts artifacts: 'backend/target/*.jar, backend/target/*.zip', fingerprint: true
+      echo "Deployed build $BUILD_NUMBER to Lambda $FUNCTION_NAME"
     }
     failure {
-      echo 'Lambda deployment failed!'
+      echo 'Deployment failed. Check the stage logs above.'
     }
   }
 }

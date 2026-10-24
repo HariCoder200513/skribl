@@ -9,7 +9,8 @@ session
 .mvn/
 mvnw
 mvnw.cmd
-
+.gitignore
+JENKINS_SETUP_AWS.md
 # IDE
 .idea/
 *.iml
